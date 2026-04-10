@@ -153,6 +153,7 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv312
 env/
 venv/
 ENV/
@@ -221,3 +222,8 @@ __marimo__/
 
 artifacts/**
 /**.pdf
+
+# deployment artifacts:
+
+.flash
+.flash/

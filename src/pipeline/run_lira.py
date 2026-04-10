@@ -452,7 +452,7 @@ def roc_curve_from_scores(member_scores, nonmember_scores):
 
 def compute_auc(member_scores, nonmember_scores):
     fpr, tpr = roc_curve_from_scores(member_scores, nonmember_scores)
-    return float(np.trapz(tpr, fpr))
+    return float(np.trapezoid(tpr, fpr))
 
 
 def compute_tpr_at_fpr(member_scores, nonmember_scores, target_fpr):
