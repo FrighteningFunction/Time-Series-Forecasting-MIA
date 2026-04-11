@@ -227,3 +227,6 @@ artifacts/**
 
 .flash
 .flash/
+
+# agent specific artifacts:
+.codex

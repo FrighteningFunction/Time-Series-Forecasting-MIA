@@ -14,8 +14,15 @@ async def eld_lira_4090(input_data: dict) -> dict:
     from src.pipeline.run_lira import run_experiment
 
     default_eld_path = (
-        "$HOME/.cache/kagglehub/datasets/eduardojst10/"
-        "electricityloaddiagrams20112014/versions/1/df_kwh_adjusted.csv"
+        Path.home()
+        / ".cache"
+        / "kagglehub"
+        / "datasets"
+        / "eduardojst10"
+        / "electricityloaddiagrams20112014"
+        / "versions"
+        / "1"
+        / "df_kwh_adjusted.csv"
     )
 
     requested_path = input_data.get("data_path")
@@ -24,7 +31,7 @@ async def eld_lira_4090(input_data: dict) -> dict:
         if not data_path.exists():
             raise FileNotFoundError(f"Requested data_path does not exist: {requested_path}")
     else:
-        data_path = Path(default_eld_path)
+        data_path = default_eld_path
         if not data_path.exists():
             import kagglehub
 
