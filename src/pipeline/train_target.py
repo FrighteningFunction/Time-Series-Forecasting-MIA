@@ -1,9 +1,13 @@
+import logging
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 
 from src.models.lstm import LSTMForecast
+
+
+logger = logging.getLogger(__name__)
 
 
 def train_model(train_ds, val_ds, config):
@@ -25,6 +29,18 @@ def train_model(train_ds, val_ds, config):
     patience = 0
     max_epochs = config.get("epochs", 50)
     patience_limit = config.get("patience", 3)
+    model_name = config.get("model_name", "model")
+
+    logger.info(
+        "Starting training for %s on %s | train=%d val=%d batch_size=%d epochs=%d patience=%d",
+        model_name,
+        config["device"],
+        len(train_ds),
+        len(val_ds),
+        batch_size,
+        max_epochs,
+        patience_limit,
+    )
 
     for epoch in range(max_epochs):
         model.train()
@@ -47,22 +63,39 @@ def train_model(train_ds, val_ds, config):
         val_loss = evaluate(model, val_loader, config)
         train_loss = train_loss_sum / max(train_examples, 1)
 
-        print(f"Epoch {epoch:03d}: train_mae={train_loss:.4f}, val_mae={val_loss:.4f}")
+        logger.info(
+            "%s epoch %03d/%03d | train_mae=%.4f val_mae=%.4f",
+            model_name,
+            epoch + 1,
+            max_epochs,
+            train_loss,
+            val_loss,
+        )
 
         if val_loss < best_val:
             best_val = val_loss
             patience = 0
             if save_path is not None:
                 torch.save(model.state_dict(), save_path)
+            logger.info("%s improved validation MAE to %.4f", model_name, best_val)
         else:
             patience += 1
             if patience >= patience_limit:
+                logger.info(
+                    "%s early stopping at epoch %03d after %d stale epochs",
+                    model_name,
+                    epoch + 1,
+                    patience,
+                )
                 break
 
     if save_path is not None and Path(save_path).exists():
         model.load_state_dict(
             torch.load(save_path, map_location=config["device"])
         )
+        logger.info("%s reloaded best checkpoint from %s", model_name, save_path)
+
+    logger.info("%s training complete", model_name)
 
     return model
 

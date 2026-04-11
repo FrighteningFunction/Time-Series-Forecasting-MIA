@@ -1,240 +1,143 @@
 # AGENTS.md
 
-## Overview
+## Purpose
 
-This codebase implements a **partial reproduction** of the paper. The goal is to reproduce some parts of the paper's results for the first time.
+This repository is a partial, reproduction-oriented implementation of the paper:
 
-> Membership Inference Attacks on Time-Series Forecasting Models
+- [Privacy Risks in Time Series Forecasting: User- and Record-Level Membership Inference](https://arxiv.org/abs/2509.04169)
 
-Specifically, it reproduces the **LiRA (Likelihood Ratio Attack)** pipeline on the **ELD dataset** using an **LSTM forecasting model**.
+Make sure to use that paper as a context when writing code for this repository. Link every parameter and methodology decisions back to that paper.
 
-The implementation focuses on correctness, modularity, and reusability for future integration (e.g., federated learning settings).
+It is not the original paper codebase. The goal here is to maintain a runnable baseline for record-level LiRA on time-series forecasting, with enough structure to validate results, extend the implementation, and run experiments locally or on rented compute.
 
----
+## Current scope
 
-# What is Implemented
+What this repo currently covers:
 
-## 1. Time-Series Forecasting Pipeline (Paper Section: Model Training)
+- LSTM forecasting target model
+- record-level LiRA attack pipeline
+- user-based dataset partitioning
+- ELD preprocessing utilities
+- synthetic smoke tests
+- paper-style result summaries via `results.json` and `paper_report.md`
 
-### Implemented in:
-- `eld.py`
-- `models/lstm.py`
-- `pipeline/train_target.py`
+What it does not currently try to cover:
 
-### Description
+- every dataset from the paper
+- every forecasting architecture from the paper
+- every attack variant from the paper
+- the original paper's exact code release or training environment
 
-- Sliding window generation:
-  - Input: past `L` timesteps
-  - Output: future `H` timesteps
-- IQR normalization per time series
-- LSTM-based forecasting model
+## Current implementation status
 
-This corresponds to the paper’s:
-> Forecasting model training on time-series data
+Main entrypoints:
 
----
+- `src/pipeline/run_lira.py`: end-to-end experiment runner
+- `src/pipeline/train_target.py`: target training and evaluation
+- `src/attacks/lira.py`: LiRA signal and scoring utilities
+- `src/data/eld.py`: ELD loading, filtering, and preprocessing
+- `bootstrap_and_run.sh`: fresh-machine setup and run helper
+- `flash_worker.py`: experimental Runpod Flash endpoint
 
-## 2. Signal Extraction (Paper Section: Attack Signals)
+Implemented behavior:
 
-### Implemented in:
-- `attacks/lira.py` (`compute_mse_signal`)
+- user-group dataset splitting rather than mixed random record splits
+- configurable LiRA runs with target and shadow training
+- offline and online ELD/LSTM record-level presets
+- synthetic end-to-end smoke validation
+- ELD raw-format preprocessing and diagnostics
 
-### Description
+## Environment expectations
 
-- Per-sample prediction error is used as the attack signal:
+The active environment target is:
 
-\[
-s(x) = \frac{1}{H} \sum_{t=1}^{H} (y_t - \hat{y}_t)^2
-\]
+- Python `3.10` to `3.12`
+- local pin: `3.12.10`
+- recommended virtualenv: `.venv312`
 
-Where:
-- \( y_t \) = true value at timestep \( t \)
-- \( \hat{y}_t \) = predicted value at timestep \( t \)
-- \( H \) = prediction horizon
+The old Python `3.8` environment was kept only for earlier project history. New work should assume the Python 3.12 environment.
 
-This matches the paper’s use of:
-> Prediction error (e.g., MSE) as a membership signal
+## ELD-specific note
 
----
+This repo currently centers on the ELD record-level path.
 
-## 3. Shadow Model Training (Paper Section: Shadow Models)
+The code supports a strict paper-style ELD preprocessing flow, but the public Kaggle mirror we used for testing does not preserve the paper's literal mean-usage filter outcome. Applying the strict absolute mean filter retains too few households for the intended `100`-household experiment.
 
-### Implemented in:
-- `pipeline/run_lira.py`
-  - `train_shadow_models`
-  - `sample_shadow_split`
+Because of that, the current practical ELD baseline uses a documented fallback:
 
-### Description
+- keep the active-span trimming
+- keep the hourly aggregation
+- keep the minimum-length filtering
+- keep the final `100`-household target
+- replace the absolute mean threshold with selection of the central `100` households by mean usage after filtering
 
-- Multiple shadow models are trained on **random subsets** of auxiliary data
-- Each shadow model has:
-  - its own training set (members)
-  - its own validation set (non-members)
+That fallback is implemented as the main practical preset for the public Kaggle mirror.
 
-This corresponds to:
-> Simulating the target model’s behavior using auxiliary data
+## Recommended execution flow
 
----
+For a fresh machine:
 
-## 4. Member vs Non-Member Distributions (Paper Core Idea)
+1. Create the Python environment.
+2. Install dependencies.
+3. Download the Kaggle ELD mirror into a stable local path.
+4. Check CUDA visibility.
+5. Run a synthetic smoke test.
+6. Launch the full ELD fallback run only after the smoke test passes.
 
-### Implemented in:
-- `run_lira`
+The repo helper for that flow is:
 
-### Description
+- `bootstrap_and_run.sh`
 
-For each shadow model:
+Recommended commands:
 
-- Training data → member signals
-- Validation data → non-member signals
+```bash
+bash bootstrap_and_run.sh
+MODE=full bash bootstrap_and_run.sh
+```
 
-Aggregated across all shadow models to estimate:
+## Paper-facing claim boundary
 
-\[
-P(s \mid \text{member}) \quad \text{and} \quad P(s \mid \text{non-member})
-\]
+The strongest safe characterization of this repository is:
 
-This is the core statistical foundation of the attack.
+- a credible partial reproduction
+- a runnable implementation baseline
+- a paper-aligned record-level LiRA pipeline with a documented ELD dataset-selection deviation when using the public Kaggle mirror
 
----
+Avoid describing this repo as:
 
-## 5. LiRA Attack (Paper Section: Likelihood Ratio Attack)
+- the original paper implementation
+- a full reproduction of every experiment in the paper
+- an exact reproduction of the original ELD setup without qualification
 
-### Implemented in:
-- `attacks/lira.py`
+If the fallback ELD run produces similar results to the paper, the best framing is:
 
-### Description
+- the repo reproduces the experimental structure and result trend credibly
+- the implementation is suitable as a baseline for further verification and extension
 
-The attack computes:
+## Flash status
 
-\[
-\text{score}(s) =
-\log P(s \mid \text{member}) - \log P(s \mid \text{non-member})
-\]
+Runpod Flash support was added experimentally in:
 
-Where:
-- \( s \) = signal (prediction error)
-- Distributions are modeled as Gaussians:
-  - \( \mu_{\text{in}}, \sigma_{\text{in}} \)
-  - \( \mu_{\text{out}}, \sigma_{\text{out}} \)
+- `flash_worker.py`
 
-Decision rule:
-- Higher score → more likely to be a member
+This is not currently the recommended primary execution path for long experiments. Flash worked as a local development concept, but remote environment initialization was unreliable in practice. For serious runs, a full Pod or equivalent machine is the safer option.
 
----
+## Practical defaults
 
-## 6. Target Model Attack (Paper Section: Attack Evaluation)
+These are the working defaults the repo is currently organized around:
 
-### Implemented in:
-- `run_lira`
+- forecasting model: LSTM
+- attack setting: record-level LiRA
+- signal: MSE
+- ELD fallback preset: `eld_lstm_record_lira_offline_mse_kaggle_fallback`
+- smoke validation before full runs
 
-### Description
+## Maintenance guidance
 
-- Signals are computed for:
-  - target training data (members)
-  - unseen data (non-members)
-- LiRA scores are computed for both groups
+When extending this repo:
 
-This corresponds to:
-> Applying the trained attack to the target model
-
----
-
-# What is NOT Yet Implemented (Deviations from Paper)
-
-## 1. User-Level Splitting
-
-### Current:
-- Random sample-level split
-
-### Paper:
-- Split by **user / entity**
-
-### Impact:
-- Current implementation performs **record-level membership inference**
-- Paper focuses on **user-level inference**
-
----
-
-## 2. Number of Shadow Models
-
-### Current:
-- ~4–8 shadow models
-
-### Paper:
-- ~64 shadow models
-
-### Impact:
-- Lower statistical stability, but still valid
-
----
-
-## 3. Multiple Signals
-
-### Current:
-- Only MSE signal
-
-### Paper:
-- Multiple signals (e.g., MAE, representation-based)
-
----
-
-## 4. Multiple Architectures
-
-### Current:
-- LSTM only
-
-### Paper:
-- Multiple models (e.g., TS2Vec, others)
-
----
-
-## 5. Federated Learning Setting
-
-### Current:
-- Centralized training
-
-### Paper:
-- Includes federated scenarios
-
----
-
-# Summary of Coverage
-
-| Component | Status |
-|----------|--------|
-| Forecasting model | ✅ Implemented |
-| Signal extraction (MSE) | ✅ Implemented |
-| Shadow models | ✅ Implemented |
-| LiRA attack | ✅ Implemented |
-| Target attack evaluation | ✅ Implemented |
-| User-level split | ❌ Not implemented |
-| Full-scale experiments | ❌ Not implemented |
-| Federated setup | ❌ Not implemented |
-
----
-
-# Interpretation
-
-This codebase reproduces:
-
-> The **core LiRA attack pipeline** for time-series forecasting models
-
-while simplifying:
-- data partitioning
-- experimental scale
-
-It is therefore a:
-
-> **Valid partial reproduction of the paper’s main attack methodology**
-
----
-
-# Future Extensions
-
-- User-level splitting (paper-accurate threat model)
-- Increased number of shadow models
-- Additional signals
-- Integration into federated learning frameworks
-
----
+- keep the README and this file aligned
+- document any new dataset-specific deviations explicitly
+- preserve smoke-testability
+- prefer practical reproducibility over paper-theory exposition here
+- cite the paper instead of duplicating its methodological explanation in repo docs

@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import math
 import random
 from pathlib import Path
@@ -17,6 +18,9 @@ from src.data.eld import (
     summarize_eld_preprocessing,
 )
 from src.pipeline.train_target import evaluate, train_model
+
+
+logger = logging.getLogger(__name__)
 
 
 PAPER_REFS = {
@@ -146,10 +150,23 @@ def prepare_user_datasets(args, seed):
     local_args.seed = seed
     preprocessing_diagnostics = None
     if args.eld_raw_format:
+        logger.info("Loading raw ELD data from %s", args.data_path)
         matrix, preprocessing_diagnostics = load_eld_matrix_with_diagnostics(local_args)
     else:
+        logger.info("Loading matrix data from %s", args.data_path if args.data_path else "<synthetic>")
         matrix = load_matrix(local_args)
     user_datasets = build_user_datasets(matrix, L=args.L, H=args.H)
+
+    logger.info(
+        "Prepared matrix with shape %s into %d user datasets (L=%d, H=%d)",
+        tuple(int(x) for x in matrix.shape),
+        len(user_datasets),
+        args.L,
+        args.H,
+    )
+
+    if preprocessing_diagnostics is not None:
+        logger.info("Preprocessing diagnostics: %s", preprocessing_diagnostics)
 
     if args.require_exact_users is not None and len(user_datasets) != args.require_exact_users:
         raise ValueError(
@@ -276,6 +293,12 @@ def compute_model_metrics(model, dataset, config):
 
 
 def compute_signal(model, dataset, device, batch_size, signal_name):
+    logger.info(
+        "Computing %s signal for %d windows on %s",
+        signal_name,
+        len(dataset),
+        device,
+    )
     loader = make_loader(dataset, batch_size=batch_size)
     values = []
     model.eval()
@@ -300,6 +323,7 @@ def compute_signal(model, dataset, device, batch_size, signal_name):
 
 def train_target_model(datasets, args, seed, run_dir):
     config = build_config(args, seed, run_dir, "target")
+    config["model_name"] = "target"
     model = train_model(datasets["target_train"], datasets["target_val"], config)
     metrics = {
         "train": compute_model_metrics(model, datasets["target_train"], config),
@@ -312,6 +336,11 @@ def train_target_model(datasets, args, seed, run_dir):
 def train_shadow_models_offline(aux_users, args, config, seed, run_dir):
     rng = np.random.default_rng(seed + 1000)
     shadow_signals = []
+    logger.info(
+        "Starting offline LiRA shadow training with %d shadow models over %d auxiliary users",
+        args.num_shadow,
+        len(aux_users),
+    )
     for shadow_idx in range(args.num_shadow):
         indices = rng.permutation(len(aux_users))
         split = len(aux_users) // 2
@@ -321,7 +350,18 @@ def train_shadow_models_offline(aux_users, args, config, seed, run_dir):
         val_ds = concat_datasets(val_users)
 
         shadow_config = dict(config)
+        shadow_config["model_name"] = f"shadow_{shadow_idx:02d}"
         shadow_config["save_path"] = str(run_dir / f"shadow_{shadow_idx:02d}.pt")
+        logger.info(
+            "Training shadow model %d/%d (%.1f%%) | train_users=%d val_users=%d train_windows=%d val_windows=%d",
+            shadow_idx + 1,
+            args.num_shadow,
+            100.0 * (shadow_idx + 1) / max(args.num_shadow, 1),
+            len(train_users),
+            len(val_users),
+            len(train_ds),
+            len(val_ds),
+        )
         model = train_model(train_ds, val_ds, shadow_config)
 
         member_signal = compute_signal(
@@ -340,11 +380,19 @@ def train_shadow_models_offline(aux_users, args, config, seed, run_dir):
             }
         )
 
+        logger.info(
+            "Completed shadow model %d/%d (%.1f%%)",
+            shadow_idx + 1,
+            args.num_shadow,
+            100.0 * (shadow_idx + 1) / max(args.num_shadow, 1),
+        )
+
     return shadow_signals
 
 
 def compute_online_candidate_stats(
     candidate_users,
+    candidate_pool_ids,
     pool_users,
     args,
     config,
@@ -357,10 +405,12 @@ def compute_online_candidate_stats(
 
     in_signals = [[] for _ in range(candidate_len)]
     out_signals = [[] for _ in range(candidate_len)]
+    pooled_in_values = []
+    pooled_out_values = []
 
     candidate_record_masks = []
-    for candidate_idx, ds in enumerate(candidate_users):
-        candidate_record_masks.extend([candidate_idx] * len(ds))
+    for candidate_pool_idx, ds in zip(candidate_pool_ids, candidate_users):
+        candidate_record_masks.extend([candidate_pool_idx] * len(ds))
 
     for shadow_idx in range(args.num_shadow):
         selected_user_ids = rng.choice(len(pool_users), size=len(pool_users) // 2, replace=False)
@@ -370,7 +420,16 @@ def compute_online_candidate_stats(
         shadow_train = concat_datasets(shadow_train_users)
         shadow_val = concat_datasets(shadow_val_users)
         shadow_config = dict(config)
+        shadow_config["model_name"] = f"shadow_online_{shadow_idx:02d}"
         shadow_config["save_path"] = str(run_dir / f"shadow_online_{shadow_idx:02d}.pt")
+        logger.info(
+            "Training online shadow model %d/%d (%.1f%%) | pool_users=%d candidate_windows=%d",
+            shadow_idx + 1,
+            args.num_shadow,
+            100.0 * (shadow_idx + 1) / max(args.num_shadow, 1),
+            len(pool_users),
+            candidate_len,
+        )
         model = train_model(shadow_train, shadow_val, shadow_config)
         candidate_signal = compute_signal(
             model, candidate_dataset, config["device"], config["batch_size"], args.signal
@@ -380,8 +439,15 @@ def compute_online_candidate_stats(
             candidate_user_idx = candidate_record_masks[idx]
             if candidate_user_idx in selected_set:
                 in_signals[idx].append(signal)
+                pooled_in_values.append(signal)
             else:
                 out_signals[idx].append(signal)
+                pooled_out_values.append(signal)
+
+    pooled_in_mean = float(np.mean(pooled_in_values)) if pooled_in_values else 0.0
+    pooled_out_mean = float(np.mean(pooled_out_values)) if pooled_out_values else 0.0
+    pooled_in_std = float(max(np.std(pooled_in_values), 1e-3)) if pooled_in_values else 1e-3
+    pooled_out_std = float(max(np.std(pooled_out_values), 1e-3)) if pooled_out_values else 1e-3
 
     stats = []
     for idx in range(candidate_len):
@@ -389,16 +455,25 @@ def compute_online_candidate_stats(
         out_values = out_signals[idx]
 
         if not in_values:
-            in_values = out_values[:]
+            in_mean = pooled_in_mean
+            in_std = pooled_in_std
+        else:
+            in_mean = float(np.mean(in_values))
+            in_std = pooled_in_std if len(in_values) < 2 else float(max(np.std(in_values), 1e-3))
+
         if not out_values:
-            out_values = in_values[:]
+            out_mean = pooled_out_mean
+            out_std = pooled_out_std
+        else:
+            out_mean = float(np.mean(out_values))
+            out_std = pooled_out_std if len(out_values) < 2 else float(max(np.std(out_values), 1e-3))
 
         stats.append(
             {
-                "in_mean": float(np.mean(in_values)),
-                "in_std": float(np.std(in_values) + 1e-8),
-                "out_mean": float(np.mean(out_values)),
-                "out_std": float(np.std(out_values) + 1e-8),
+                "in_mean": in_mean,
+                "in_std": in_std,
+                "out_mean": out_mean,
+                "out_std": out_std,
             }
         )
 
@@ -581,10 +656,23 @@ def write_paper_report(args, final_summary, output_dir):
 
 
 def run_single_experiment(args, run_seed, run_dir):
+    logger.info("Starting run with seed=%d in %s", run_seed, run_dir)
     seed_everything(run_seed)
+    logger.info("Stage 1/4: preparing datasets")
     datasets = prepare_user_datasets(args, run_seed)
+    logger.info(
+        "User split | total=%d train=%d val=%d test=%d aux=%d",
+        datasets["num_total_users"],
+        datasets["num_train_users"],
+        datasets["num_val_users"],
+        datasets["num_test_users"],
+        datasets["num_aux_users"],
+    )
+    logger.info("Stage 2/4: training target model")
     target_model, config, target_metrics = train_target_model(datasets, args, run_seed, run_dir)
+    logger.info("Target model metrics: %s", target_metrics)
 
+    logger.info("Stage 3/4: computing target signals")
     target_member_signal = compute_signal(
         target_model,
         datasets["target_train"],
@@ -601,8 +689,11 @@ def run_single_experiment(args, run_seed, run_dir):
     )
 
     if args.attack_setting == "online":
+        logger.info("Stage 4/4: computing online LiRA scores")
+        logger.info("Scoring online LiRA members")
         candidate_stats = compute_online_candidate_stats(
             datasets["target_train_users"],
+            list(range(len(datasets["target_train_users"]))),
             datasets["target_train_users"] + datasets["target_test_users"],
             args,
             config,
@@ -611,8 +702,15 @@ def run_single_experiment(args, run_seed, run_dir):
         )
         member_scores = score_lira_online(target_member_signal, candidate_stats)
 
+        logger.info("Scoring online LiRA non-members")
         candidate_stats_nonmember = compute_online_candidate_stats(
             datasets["target_test_users"],
+            list(
+                range(
+                    len(datasets["target_train_users"]),
+                    len(datasets["target_train_users"]) + len(datasets["target_test_users"]),
+                )
+            ),
             datasets["target_train_users"] + datasets["target_test_users"],
             args,
             config,
@@ -621,6 +719,8 @@ def run_single_experiment(args, run_seed, run_dir):
         )
         nonmember_scores = score_lira_online(target_nonmember_signal, candidate_stats_nonmember)
     else:
+        logger.info("Stage 4/4: training offline LiRA shadows and scoring")
+        logger.info("Training offline LiRA shadows")
         shadow_stats = train_shadow_models_offline(
             datasets["aux_users"],
             args,
@@ -632,6 +732,13 @@ def run_single_experiment(args, run_seed, run_dir):
         nonmember_scores = score_lira_offline(target_nonmember_signal, shadow_stats)
 
     summary = summarize_scores(member_scores, nonmember_scores)
+    logger.info(
+        "Run %d summary | auc=%.4f tpr@1%%fpr=%.4f tpr@0.1%%fpr=%.4f",
+        run_seed,
+        summary["auc"],
+        summary["tpr_at_1pct_fpr"],
+        summary["tpr_at_0.1pct_fpr"],
+    )
     summary.update(
         {
             "seed": run_seed,
@@ -655,6 +762,15 @@ def run_single_experiment(args, run_seed, run_dir):
 def run_experiment(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Running experiment '%s' | preset=%s setting=%s signal=%s runs=%d output=%s",
+        args.experiment_name,
+        args.paper_preset,
+        args.attack_setting,
+        args.signal,
+        args.num_runs,
+        output_dir,
+    )
 
     run_summaries = []
     target_metrics_runs = []
@@ -662,8 +778,15 @@ def run_experiment(args):
         run_seed = args.seed + run_idx
         run_dir = output_dir / f"run_{run_idx:02d}"
         run_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Starting experiment run %d/%d (%.1f%%)",
+            run_idx + 1,
+            args.num_runs,
+            100.0 * (run_idx + 1) / max(args.num_runs, 1),
+        )
         summary, target_metrics = run_single_experiment(args, run_seed, run_dir)
         (run_dir / "results.json").write_text(json.dumps(summary, indent=2))
+        logger.info("Saved per-run results to %s", run_dir / "results.json")
         run_summaries.append(summary)
         target_metrics_runs.append(target_metrics)
 
@@ -703,9 +826,9 @@ def run_experiment(args):
     results_path.write_text(json.dumps(final_summary, indent=2))
     report_path = write_paper_report(args, final_summary, output_dir)
 
-    print(json.dumps(final_summary, indent=2))
-    print(f"Saved results to {results_path}")
-    print(f"Saved paper report to {report_path}")
+    logger.info("Final summary: %s", json.dumps(final_summary, indent=2))
+    logger.info("Saved results to %s", results_path)
+    logger.info("Saved paper report to %s", report_path)
     return final_summary
 
 
@@ -829,4 +952,8 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
     run_experiment(parse_args())

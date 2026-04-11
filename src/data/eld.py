@@ -27,10 +27,20 @@ def create_windows(series, L=100, H=20):
 
 def iqr_normalize(x):
     x = np.asarray(x, dtype=np.float32)
+    median = np.median(x)
     q1 = np.percentile(x, 25)
     q3 = np.percentile(x, 75)
-    iqr = q3 - q1 + 1e-8
-    return (x - q1) / iqr
+    iqr = q3 - q1
+
+    # RobustScaler-style centering/scaling is much safer here than dividing by
+    # a near-zero IQR. Sparse ELD households often have q1 == q3 == 0
+    if iqr < 1e-6:
+        std = float(np.std(x))
+        scale = std if std >= 1e-6 else 1.0
+    else:
+        scale = float(iqr)
+
+    return (x - median) / scale
 
 
 def preprocess_eld_matrix(
