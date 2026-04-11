@@ -153,6 +153,7 @@ activemq-data/
 .env
 .envrc
 .venv
+.venv312
 env/
 venv/
 ENV/
@@ -216,3 +217,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# run artifacts
+
+artifacts/**
+/**.pdf
+
+# deployment artifacts:
+
+.flash
+.flash/
+
+# agent specific artifacts:
+.codex
